@@ -1,5 +1,4 @@
 import streamlit as st
-import yfinance as yf
 import pandas as pd
 import numpy as np
 from sklearn.ensemble import RandomForestRegressor
@@ -7,7 +6,6 @@ from sklearn.preprocessing import StandardScaler
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import ta
-import time
 
 st.set_page_config(page_title="Stock ML Dashboard", page_icon="📈", layout="wide")
 
@@ -17,8 +15,9 @@ st.markdown("Real-time stock analysis with machine learning predictions")
 # Sidebar
 with st.sidebar:
     st.header("Settings")
+    use_demo = st.checkbox("Use Demo Data (Yahoo Finance down)", value=True)
     ticker = st.text_input("Stock Ticker", "AAPL").upper()
-    period = st.selectbox("Time Period", ["1mo", "3mo", "6mo", "1y", "2y"], index=3)
+    period = st.selectbox("Time Period", ["1mo", "3mo", "6mo", "1y"], index=3)
     
     st.divider()
     st.markdown("### Popular Stocks")
@@ -32,16 +31,52 @@ with st.sidebar:
         if st.button("TSLA"): ticker = "TSLA"
         if st.button("AMZN"): ticker = "AMZN"
 
-# Better caching - cache for 1 hour
-@st.cache_data(ttl=3600, show_spinner=False)
-def get_stock_data(ticker, period):
+def generate_demo_data(ticker, days=252):
+    """Generate realistic demo stock data"""
+    np.random.seed(hash(ticker) % 10000)
+    
+    # Base prices for different stocks
+    base_prices = {
+        'AAPL': 180, 'MSFT': 380, 'GOOGL': 140, 
+        'TSLA': 250, 'NVDA': 500, 'AMZN': 170
+    }
+    base_price = base_prices.get(ticker, 100)
+    
+    dates = pd.date_range(end=datetime.now(), periods=days, freq='D')
+    
+    # Generate realistic price movement
+    returns = np.random.normal(0.001, 0.02, days)
+    price = base_price * np.exp(np.cumsum(returns))
+    
+    # Generate OHLC
+    df = pd.DataFrame({
+        'Open': price * (1 + np.random.uniform(-0.01, 0.01, days)),
+        'High': price * (1 + np.random.uniform(0, 0.02, days)),
+        'Low': price * (1 - np.random.uniform(0, 0.02, days)),
+        'Close': price,
+        'Volume': np.random.randint(50e6, 150e6, days)
+    }, index=dates)
+    
+    # Add technical indicators
+    df['SMA_20'] = df['Close'].rolling(window=20).mean()
+    df['SMA_50'] = df['Close'].rolling(window=50).mean()
+    df['RSI'] = ta.momentum.RSIIndicator(df['Close']).rsi()
+    df['MACD'] = ta.trend.MACD(df['Close']).macd()
+    
+    return df
+
+def get_live_data(ticker, period):
+    """Try to get live data from Yahoo Finance"""
     try:
-        time.sleep(0.5)  # Rate limit protection
+        import yfinance as yf
+        import time
+        
+        time.sleep(1)  # Rate limit
         stock = yf.Ticker(ticker)
         df = stock.history(period=period)
         
         if df.empty:
-            return None, None
+            return None
         
         # Add technical indicators
         df['SMA_20'] = df['Close'].rolling(window=20).mean()
@@ -49,46 +84,33 @@ def get_stock_data(ticker, period):
         df['RSI'] = ta.momentum.RSIIndicator(df['Close']).rsi()
         df['MACD'] = ta.trend.MACD(df['Close']).macd()
         
-        # Get basic info only
-        info = {
-            'longName': ticker,
-            'previousClose': df['Close'].iloc[-2] if len(df) > 1 else df['Close'].iloc[-1],
-            'marketCap': 0,
-            'fiftyTwoWeekHigh': df['High'].max(),
-            'sector': 'N/A',
-            'industry': 'N/A',
-            'website': 'N/A',
-            'exchange': 'N/A'
-        }
-        
-        return df, info
-    except Exception as e:
-        st.error(f"⚠️ Rate limit hit or API error. Please wait 60 seconds and try again.")
-        return None, None
+        return df
+    except:
+        return None
 
-# Load data with spinner
-with st.spinner(f"Loading {ticker} data..."):
-    result = get_stock_data(ticker, period)
-    
-if result[0] is None:
-    st.error(f"❌ Could not load data for {ticker}")
-    st.info("**Troubleshooting:**\n- Wait 60 seconds and refresh\n- Check if ticker symbol is correct\n- Try a different stock")
-    st.stop()
-
-df, info = result
+# Load data
+if use_demo:
+    st.info(f"📊 Showing demo data for {ticker} (Yahoo Finance currently unavailable)")
+    df = generate_demo_data(ticker)
+else:
+    with st.spinner(f"Loading {ticker} data from Yahoo Finance..."):
+        df = get_live_data(ticker, period)
+        if df is None:
+            st.warning(f"⚠️ Could not load live data. Switching to demo mode...")
+            df = generate_demo_data(ticker)
 
 # Display key metrics
 col1, col2, col3, col4 = st.columns(4)
 
 current_price = df['Close'].iloc[-1]
-prev_close = info.get('previousClose', df['Close'].iloc[-2])
+prev_close = df['Close'].iloc[-2]
 change = current_price - prev_close
 change_pct = (change / prev_close) * 100
 
 col1.metric("Current Price", f"${current_price:.2f}", f"{change:+.2f} ({change_pct:+.2f}%)")
 col2.metric("Volume", f"{df['Volume'].iloc[-1]:,.0f}")
-col3.metric("52W High", f"${info.get('fiftyTwoWeekHigh', 0):.2f}")
-col4.metric("Days Loaded", len(df))
+col3.metric("52W High", f"${df['High'].max():.2f}")
+col4.metric("Days of Data", len(df))
 
 # Price chart
 st.subheader("📊 Price Chart with Technical Indicators")
@@ -130,6 +152,11 @@ try:
     model = RandomForestRegressor(n_estimators=100, random_state=42)
     model.fit(X_scaled[:-5], y[:-5])
     
+    # Model accuracy on test set
+    test_predictions = model.predict(X_scaled[-5:])
+    test_actual = y[-5:]
+    accuracy = 100 * (1 - np.mean(np.abs(test_predictions - test_actual) / test_actual))
+    
     # Predict next 5 days
     last_data = X_scaled[-1].reshape(1, -1)
     predictions = []
@@ -145,10 +172,12 @@ try:
     
     with col1:
         pred_df = pd.DataFrame({
-            'Date': dates,
-            'Predicted Price': [f"${p:.2f}" for p in predictions]
+            'Date': [d.strftime('%Y-%m-%d') for d in dates],
+            'Predicted Price': [f"${p:.2f}" for p in predictions],
+            'Change': [f"{((p/current_price - 1)*100):+.2f}%" for p in predictions]
         })
         st.dataframe(pred_df, use_container_width=True, hide_index=True)
+        st.caption(f"Model Accuracy: {accuracy:.1f}%")
     
     with col2:
         # Prediction chart
@@ -157,14 +186,15 @@ try:
             x=df.index[-30:],
             y=df['Close'].iloc[-30:],
             name='Historical',
-            line=dict(color='blue')
+            line=dict(color='blue', width=2)
         ))
         fig_pred.add_trace(go.Scatter(
             x=dates,
             y=predictions,
             name='Predicted',
-            line=dict(color='red', dash='dash'),
-            mode='lines+markers'
+            line=dict(color='red', dash='dash', width=2),
+            mode='lines+markers',
+            marker=dict(size=8)
         ))
         fig_pred.update_layout(
             title="5-Day Price Forecast",
@@ -199,10 +229,23 @@ try:
     fig_vol.add_trace(go.Bar(x=df.index, y=df['Volume'], name='Volume', marker_color=colors))
     fig_vol.update_layout(height=250, showlegend=False)
     st.plotly_chart(fig_vol, use_container_width=True)
+    
+    # Key Statistics
+    with st.expander("📈 Key Statistics"):
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Average Volume", f"{df['Volume'].mean():,.0f}")
+            st.metric("Volatility (30d)", f"{df['Close'].pct_change().tail(30).std()*100:.2f}%")
+        with col2:
+            st.metric("52W Low", f"${df['Low'].min():.2f}")
+            st.metric("30d High", f"${df['High'].tail(30).max():.2f}")
+        with col3:
+            st.metric("30d Low", f"${df['Low'].tail(30).min():.2f}")
+            st.metric("Avg Daily Return", f"{df['Close'].pct_change().mean()*100:.2f}%")
 
 except Exception as e:
     st.error(f"Error in ML prediction: {str(e)}")
 
 st.divider()
-st.markdown("**Data Source:** Yahoo Finance (Free) | **ML Model:** Random Forest | **Cache:** 1 hour")
-st.caption("⚠️ If you see rate limit errors, wait 60 seconds before trying again")
+data_source = "Demo Data" if use_demo else "Yahoo Finance (Live)"
+st.markdown(f"**Data Source:** {data_source} | **ML Model:** Random Forest Regressor | **Features:** 8 technical indicators")
