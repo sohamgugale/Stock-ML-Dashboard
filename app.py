@@ -7,6 +7,7 @@ from sklearn.preprocessing import StandardScaler
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import ta
+import time
 
 st.set_page_config(page_title="Stock ML Dashboard", page_icon="📈", layout="wide")
 
@@ -21,68 +22,101 @@ with st.sidebar:
     
     st.divider()
     st.markdown("### Popular Stocks")
-    if st.button("AAPL - Apple"): ticker = "AAPL"
-    if st.button("MSFT - Microsoft"): ticker = "MSFT"
-    if st.button("GOOGL - Google"): ticker = "GOOGL"
-    if st.button("TSLA - Tesla"): ticker = "TSLA"
-    if st.button("NVDA - Nvidia"): ticker = "NVDA"
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("AAPL"): ticker = "AAPL"
+        if st.button("GOOGL"): ticker = "GOOGL"
+        if st.button("NVDA"): ticker = "NVDA"
+    with col2:
+        if st.button("MSFT"): ticker = "MSFT"
+        if st.button("TSLA"): ticker = "TSLA"
+        if st.button("AMZN"): ticker = "AMZN"
 
-# Fetch data
-@st.cache_data(ttl=3600)
+# Better caching - cache for 1 hour
+@st.cache_data(ttl=3600, show_spinner=False)
 def get_stock_data(ticker, period):
-    stock = yf.Ticker(ticker)
-    df = stock.history(period=period)
+    try:
+        time.sleep(0.5)  # Rate limit protection
+        stock = yf.Ticker(ticker)
+        df = stock.history(period=period)
+        
+        if df.empty:
+            return None, None
+        
+        # Add technical indicators
+        df['SMA_20'] = df['Close'].rolling(window=20).mean()
+        df['SMA_50'] = df['Close'].rolling(window=50).mean()
+        df['RSI'] = ta.momentum.RSIIndicator(df['Close']).rsi()
+        df['MACD'] = ta.trend.MACD(df['Close']).macd()
+        
+        # Get basic info only
+        info = {
+            'longName': ticker,
+            'previousClose': df['Close'].iloc[-2] if len(df) > 1 else df['Close'].iloc[-1],
+            'marketCap': 0,
+            'fiftyTwoWeekHigh': df['High'].max(),
+            'sector': 'N/A',
+            'industry': 'N/A',
+            'website': 'N/A',
+            'exchange': 'N/A'
+        }
+        
+        return df, info
+    except Exception as e:
+        st.error(f"⚠️ Rate limit hit or API error. Please wait 60 seconds and try again.")
+        return None, None
+
+# Load data with spinner
+with st.spinner(f"Loading {ticker} data..."):
+    result = get_stock_data(ticker, period)
     
-    # Add technical indicators
-    df['SMA_20'] = df['Close'].rolling(window=20).mean()
-    df['SMA_50'] = df['Close'].rolling(window=50).mean()
-    df['RSI'] = ta.momentum.RSIIndicator(df['Close']).rsi()
-    df['MACD'] = ta.trend.MACD(df['Close']).macd()
-    
-    return df, stock.info
+if result[0] is None:
+    st.error(f"❌ Could not load data for {ticker}")
+    st.info("**Troubleshooting:**\n- Wait 60 seconds and refresh\n- Check if ticker symbol is correct\n- Try a different stock")
+    st.stop()
+
+df, info = result
+
+# Display key metrics
+col1, col2, col3, col4 = st.columns(4)
+
+current_price = df['Close'].iloc[-1]
+prev_close = info.get('previousClose', df['Close'].iloc[-2])
+change = current_price - prev_close
+change_pct = (change / prev_close) * 100
+
+col1.metric("Current Price", f"${current_price:.2f}", f"{change:+.2f} ({change_pct:+.2f}%)")
+col2.metric("Volume", f"{df['Volume'].iloc[-1]:,.0f}")
+col3.metric("52W High", f"${info.get('fiftyTwoWeekHigh', 0):.2f}")
+col4.metric("Days Loaded", len(df))
+
+# Price chart
+st.subheader("📊 Price Chart with Technical Indicators")
+
+fig = go.Figure()
+fig.add_trace(go.Candlestick(
+    x=df.index,
+    open=df['Open'],
+    high=df['High'],
+    low=df['Low'],
+    close=df['Close'],
+    name='Price'
+))
+fig.add_trace(go.Scatter(x=df.index, y=df['SMA_20'], name='SMA 20', line=dict(color='orange', width=1)))
+fig.add_trace(go.Scatter(x=df.index, y=df['SMA_50'], name='SMA 50', line=dict(color='blue', width=1)))
+
+fig.update_layout(
+    xaxis_title="Date",
+    yaxis_title="Price ($)",
+    height=500,
+    hovermode='x unified'
+)
+st.plotly_chart(fig, use_container_width=True)
+
+# ML Prediction
+st.subheader("🤖 ML Price Prediction (Next 5 Days)")
 
 try:
-    df, info = get_stock_data(ticker, period)
-    
-    # Display key metrics
-    col1, col2, col3, col4 = st.columns(4)
-    
-    current_price = df['Close'].iloc[-1]
-    prev_close = info.get('previousClose', df['Close'].iloc[-2])
-    change = current_price - prev_close
-    change_pct = (change / prev_close) * 100
-    
-    col1.metric("Current Price", f"${current_price:.2f}", f"{change:+.2f} ({change_pct:+.2f}%)")
-    col2.metric("Volume", f"{df['Volume'].iloc[-1]:,.0f}")
-    col3.metric("Market Cap", f"${info.get('marketCap', 0)/1e9:.2f}B")
-    col4.metric("52W High", f"${info.get('fiftyTwoWeekHigh', 0):.2f}")
-    
-    # Price chart
-    st.subheader("📊 Price Chart with Technical Indicators")
-    
-    fig = go.Figure()
-    fig.add_trace(go.Candlestick(
-        x=df.index,
-        open=df['Open'],
-        high=df['High'],
-        low=df['Low'],
-        close=df['Close'],
-        name='Price'
-    ))
-    fig.add_trace(go.Scatter(x=df.index, y=df['SMA_20'], name='SMA 20', line=dict(color='orange')))
-    fig.add_trace(go.Scatter(x=df.index, y=df['SMA_50'], name='SMA 50', line=dict(color='blue')))
-    
-    fig.update_layout(
-        xaxis_title="Date",
-        yaxis_title="Price ($)",
-        height=500,
-        hovermode='x unified'
-    )
-    st.plotly_chart(fig, use_container_width=True)
-    
-    # ML Prediction
-    st.subheader("🤖 ML Price Prediction (Next 5 Days)")
-    
     # Prepare features
     df_ml = df.dropna()
     features = ['Open', 'High', 'Low', 'Volume', 'SMA_20', 'SMA_50', 'RSI', 'MACD']
@@ -112,9 +146,9 @@ try:
     with col1:
         pred_df = pd.DataFrame({
             'Date': dates,
-            'Predicted Price': predictions
+            'Predicted Price': [f"${p:.2f}" for p in predictions]
         })
-        st.dataframe(pred_df, use_container_width=True)
+        st.dataframe(pred_df, use_container_width=True, hide_index=True)
     
     with col2:
         # Prediction chart
@@ -133,7 +167,7 @@ try:
             mode='lines+markers'
         ))
         fig_pred.update_layout(
-            title="Price Forecast",
+            title="5-Day Price Forecast",
             xaxis_title="Date",
             yaxis_title="Price ($)",
             height=300
@@ -146,39 +180,29 @@ try:
     col1, col2, col3 = st.columns(3)
     
     with col1:
-        st.metric("RSI (14)", f"{df['RSI'].iloc[-1]:.2f}", 
-                  "Overbought" if df['RSI'].iloc[-1] > 70 else "Oversold" if df['RSI'].iloc[-1] < 30 else "Neutral")
+        rsi_val = df['RSI'].iloc[-1]
+        rsi_signal = "🔴 Overbought" if rsi_val > 70 else "🟢 Oversold" if rsi_val < 30 else "⚪ Neutral"
+        st.metric("RSI (14)", f"{rsi_val:.2f}", rsi_signal)
     
     with col2:
-        macd_signal = "Bullish" if df['MACD'].iloc[-1] > 0 else "Bearish"
+        macd_signal = "🟢 Bullish" if df['MACD'].iloc[-1] > 0 else "🔴 Bearish"
         st.metric("MACD Signal", macd_signal)
     
     with col3:
-        trend = "Uptrend" if df['SMA_20'].iloc[-1] > df['SMA_50'].iloc[-1] else "Downtrend"
+        trend = "📈 Uptrend" if df['SMA_20'].iloc[-1] > df['SMA_50'].iloc[-1] else "📉 Downtrend"
         st.metric("Trend", trend)
     
     # Volume analysis
     st.subheader("📊 Volume Analysis")
     fig_vol = go.Figure()
-    fig_vol.add_trace(go.Bar(x=df.index, y=df['Volume'], name='Volume'))
-    fig_vol.update_layout(height=250)
+    colors = ['red' if df['Close'].iloc[i] < df['Open'].iloc[i] else 'green' for i in range(len(df))]
+    fig_vol.add_trace(go.Bar(x=df.index, y=df['Volume'], name='Volume', marker_color=colors))
+    fig_vol.update_layout(height=250, showlegend=False)
     st.plotly_chart(fig_vol, use_container_width=True)
-    
-    # Company info
-    with st.expander("ℹ️ Company Information"):
-        col1, col2 = st.columns(2)
-        with col1:
-            st.write(f"**Company:** {info.get('longName', ticker)}")
-            st.write(f"**Sector:** {info.get('sector', 'N/A')}")
-            st.write(f"**Industry:** {info.get('industry', 'N/A')}")
-        with col2:
-            st.write(f"**Employees:** {info.get('fullTimeEmployees', 'N/A'):,}")
-            st.write(f"**Website:** {info.get('website', 'N/A')}")
-            st.write(f"**Exchange:** {info.get('exchange', 'N/A')}")
 
 except Exception as e:
-    st.error(f"Error loading data for {ticker}. Please check the ticker symbol.")
-    st.write(f"Details: {str(e)}")
+    st.error(f"Error in ML prediction: {str(e)}")
 
 st.divider()
-st.markdown("**Data Source:** Yahoo Finance | **ML Model:** Random Forest | **Update Frequency:** Real-time")
+st.markdown("**Data Source:** Yahoo Finance (Free) | **ML Model:** Random Forest | **Cache:** 1 hour")
+st.caption("⚠️ If you see rate limit errors, wait 60 seconds before trying again")
